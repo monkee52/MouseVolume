@@ -22,23 +22,121 @@ typedef struct tagMV_MouseMapping {
 	WORD vk;
 } MV_MouseMapping;
 
-#define MOUSEMAP_COUNT 2
-#define MOUSEMAP_VOLUME_DN 0
-#define MOUSEMAP_VOLUME_UP 1
+typedef struct tagMV_MouseMappingArray {
+	DWORD length;
+	MV_MouseMapping* item[0];
+} *MV_MouseMappingArray;
 
-MV_MouseMapping mouseMaps[MOUSEMAP_COUNT];
+BOOL MV_InitMouseMap(MV_MouseMappingArray* arrPtr) {
+	if (arrPtr == NULL) {
+		return FALSE;
+	}
 
-void initHooks() {
-	mouseMaps[MOUSEMAP_VOLUME_DN].delayTimer = 0;
-	mouseMaps[MOUSEMAP_VOLUME_DN].repeatTimer = 0;
-	mouseMaps[MOUSEMAP_VOLUME_DN].button = 1;
-	mouseMaps[MOUSEMAP_VOLUME_DN].vk = VK_VOLUME_DOWN;
+	DWORD proposedLength = sizeof(struct tagMV_MouseMappingArray);
+	MV_MouseMappingArray allocResult = HeapAlloc(GetProcessHeap(), HEAP_NO_SERIALIZE, proposedLength);
 
-	mouseMaps[MOUSEMAP_VOLUME_UP].delayTimer = 0;
-	mouseMaps[MOUSEMAP_VOLUME_UP].repeatTimer = 0;
-	mouseMaps[MOUSEMAP_VOLUME_UP].button = 2;
-	mouseMaps[MOUSEMAP_VOLUME_UP].vk = VK_VOLUME_UP;
+	if (allocResult == NULL) {
+		return FALSE;
+	}
+
+	allocResult->length = 0;
+
+	*arrPtr = allocResult;
+
+	return TRUE;
 }
+
+BOOL MV_AddMouseMap(MV_MouseMappingArray* arrPtr, WORD button, WORD vk) {
+	if (arrPtr == NULL) {
+		return FALSE;
+	}
+
+	MV_MouseMappingArray arr = *arrPtr;
+
+	if (arr == NULL) {
+		return FALSE;
+	}
+
+	HANDLE hProcessHeap = GetProcessHeap();
+
+	// Create mouse mapping
+	MV_MouseMapping* mapping = HeapAlloc(hProcessHeap, HEAP_NO_SERIALIZE, sizeof(MV_MouseMapping));
+
+	if (mapping == NULL) {
+		return FALSE;
+	}
+
+	mapping->delayTimer = 0;
+	mapping->repeatTimer = 0;
+	mapping->button = button;
+	mapping->vk = vk;
+
+	DWORD proposedLength = arr->length + 1;
+	DWORD proposedSize = proposedLength * sizeof(MV_MouseMapping*) + sizeof(struct tagMV_MouseMappingArray);
+
+	LPVOID reallocResult = HeapReAlloc(hProcessHeap, HEAP_NO_SERIALIZE, arr, proposedSize);
+
+	if (reallocResult == NULL) {
+		// Free created mapping
+		HeapFree(hProcessHeap, HEAP_NO_SERIALIZE, mapping);
+
+		return FALSE;
+	}
+
+	arr = reallocResult;
+	*arrPtr = reallocResult;
+
+	arr->item[arr->length] = mapping;
+	arr->length = proposedLength;
+
+	return TRUE;
+}
+
+BOOL MV_FreeMouseMap(MV_MouseMappingArray* arrPtr) {
+	if (arrPtr == NULL) {
+		return FALSE;
+	}
+
+	MV_MouseMappingArray arr = *arrPtr;
+
+	if (arr == NULL) {
+		return TRUE;
+	}
+
+	HANDLE hProcessHeap = GetProcessHeap();
+
+	for (int i = 0; i < arr->length; i++) {
+		MV_MouseMapping* item = arr->item[i];
+
+		if (item == NULL) {
+			continue;
+		}
+
+		if (item->delayTimer != 0) {
+			KillTimer(NULL, item->delayTimer);
+
+			item->delayTimer = 0;
+		}
+
+		if (item->repeatTimer != 0) {
+			KillTimer(NULL, item->repeatTimer);
+
+			item->repeatTimer = 0;
+		}
+
+		HeapFree(hProcessHeap, HEAP_NO_SERIALIZE, item);
+
+		arr->item[i] = NULL;
+	}
+
+	HeapFree(hProcessHeap, HEAP_NO_SERIALIZE, arr);
+
+	*arrPtr = NULL;
+
+	return TRUE;
+}
+
+MV_MouseMappingArray mouseMaps = NULL;
 
 double fmap(double x, double from1, double from2, double to1, double to2) {
 	return (x - from1) / (from2 - from1) * (to2 - to1) + to1;
@@ -68,30 +166,36 @@ VOID SendVk(WORD vk) {
 
 VOID CALLBACK MouseMappingTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime) {
 	// Find mapping
-	for (int i = 0; i < MOUSEMAP_COUNT; i++) {
-		if (mouseMaps[i].delayTimer == idEvent || mouseMaps[i].repeatTimer == idEvent) {
-			MV_MouseMapping* mapping = &(mouseMaps[i]);
+	for (int i = 0; i < mouseMaps->length; i++) {
+		MV_MouseMapping* item = mouseMaps->item[i];
 
+		if (item == NULL) {
+			continue;
+		}
+
+		if (item->delayTimer == idEvent || item->repeatTimer == idEvent) {
 			// Determine delay state
-			if (mapping->delayTimer == idEvent) {
-				KillTimer(NULL, mapping->delayTimer);
+			if (item->delayTimer == idEvent) {
+				KillTimer(NULL, item->delayTimer);
 
-				mapping->delayTimer = 0;
+				item->delayTimer = 0;
 
 				// Get repeat rate
-				DWORD kbdRepeatRate;
+				DWORD dwKbdRepeatRate;
 
-				SystemParametersInfo(SPI_GETKEYBOARDSPEED, 0, &kbdRepeatRate, 0);
+				SystemParametersInfo(SPI_GETKEYBOARDSPEED, 0, &dwKbdRepeatRate, 0);
 
-				UINT kbdRepeatInterval = (UINT)fmap(kbdRepeatRate, 0.0, 31.0, 400.0, 33.0);
+				UINT kbdRepeatInterval = (UINT)fmap(dwKbdRepeatRate, 0.0, 31.0, 400.0, 33.0);
 
 				// Init repeat timer
-				mapping->repeatTimer = SetTimer(NULL, 0, kbdRepeatInterval, MouseMappingTimerProc);
+				if (item->repeatTimer == 0) {
+					item->repeatTimer = SetTimer(NULL, 0, kbdRepeatInterval, MouseMappingTimerProc);
+				}
 			}
 
 			// Repeat state
-			if (mapping->repeatTimer == idEvent) {
-				SendVk(mapping->vk);
+			if (item->repeatTimer == idEvent) {
+				SendVk(item->vk);
 			}
 		}
 	}
@@ -106,39 +210,47 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 			BOOL cancel = FALSE;
 
 			// Find mapping for button
-			for (int i = 0; i < MOUSEMAP_COUNT; i++) {
-				if (mouseMaps[i].button == button) {
+			for (int i = 0; i < mouseMaps->length; i++) {
+				MV_MouseMapping* item = mouseMaps->item[i];
+
+				if (item == NULL) {
+					continue;
+				}
+
+				if (item->button != button) {
+					continue;
+				}
+
+				if (wParam == WM_XBUTTONUP) {
 					cancel = TRUE;
 
-					MV_MouseMapping* mapping = &(mouseMaps[i]);
+					if (item->delayTimer != 0) {
+						KillTimer(NULL, item->delayTimer);
 
-					// Cancel timers if they're active
-					if (wParam == WM_XBUTTONUP) {
-						if (mapping->delayTimer != 0) {
-							KillTimer(NULL, mapping->delayTimer);
-
-							mapping->delayTimer = 0;
-						}
-
-						if (mapping->repeatTimer != 0) {
-							KillTimer(NULL, mapping->repeatTimer);
-
-							mapping->repeatTimer = 0;
-						}
+						item->delayTimer = 0;
 					}
-					else {
-						// Find keyboard repeat delay
-						int kbdDelay;
 
-						SystemParametersInfo(SPI_GETKEYBOARDDELAY, 0, &kbdDelay, 0);
+					if (item->repeatTimer != 0) {
+						KillTimer(NULL, item->repeatTimer);
 
-						UINT kbdDelayTime = (UINT)fmap(kbdDelay, 0.0, 3.0, 250.0, 1000.0);
+						item->repeatTimer = 0;
+					}
+				} else if (wParam == WM_XBUTTONDOWN) {
+					cancel = TRUE;
 
-						// Init delay timer
-						mapping->delayTimer = SetTimer(NULL, 0, kbdDelayTime, MouseMappingTimerProc);
+					// Find keyboard repeat delay
+					int kbdDelay;
+
+					SystemParametersInfo(SPI_GETKEYBOARDDELAY, 0, &kbdDelay, 0);
+
+					UINT kbdDelayTime = (UINT)fmap(kbdDelay, 0.0, 3.0, 250.0, 1000.0);
+
+					// Init delay timer
+					if (item->delayTimer == 0) {
+						item->delayTimer = SetTimer(NULL, 0, kbdDelayTime, MouseMappingTimerProc);
 
 						// Send single VK
-						SendVk(mapping->vk);
+						SendVk(item->vk);
 					}
 				}
 			}
@@ -156,22 +268,49 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// Only one instance
 	HANDLE hMutex = OpenMutex(MUTEX_ALL_ACCESS, FALSE, TEXT("MouseVolume.0"));
 
-	if (!hMutex) {
-		hMutex = CreateMutex(NULL, FALSE, TEXT("MouseVolume.0"));
-	} else {
-		return 0;
+	// Create mutex if it doesn't exist
+	if (hMutex == NULL) {
+		DWORD dwLastError = GetLastError();
+
+		if (dwLastError == ERROR_FILE_NOT_FOUND) {
+			hMutex = CreateMutex(NULL, FALSE, TEXT("MouseVolume.0"));
+		} else {
+			return dwLastError;
+		}
 	}
 
-	initHooks();
+	if (!MV_InitMouseMap(&mouseMaps)) {
+		ReleaseMutex(hMutex);
+
+		return GetLastError();
+	}
+
+	MV_AddMouseMap(&mouseMaps, 1, VK_VOLUME_DOWN);
+	MV_AddMouseMap(&mouseMaps, 2, VK_VOLUME_UP);
+
+	if (mouseMaps->length == 0) {
+		ReleaseMutex(hMutex);
+
+		return GetLastError();
+	}
 
 	mouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, hInstance, 0);
+
+	if (mouseHook == NULL) {
+		ReleaseMutex(hMutex);
+
+		return GetLastError();
+	}
 
 	// Message loop
 	MSG msg;
 
 	msg.message = 0;
 
-	while (GetMessage(&msg, NULL, 0, 0)) {
+	BOOL bGetMessageResult;
+	DWORD dwGetMessageError;
+
+	while ((bGetMessageResult = GetMessage(&msg, NULL, 0, 0)) != -1) {
 		if (msg.message == WM_QUIT) {
 			break;
 		}
@@ -182,27 +321,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		Sleep(0);
 	}
 
-	// Cleanup
-	for (int i = 0; i < MOUSEMAP_COUNT; i++) {
-		// Kill timers
-		if (mouseMaps[i].delayTimer != 0) {
-			KillTimer(NULL, mouseMaps[i].delayTimer);
-
-			mouseMaps[i].delayTimer = 0;
-		}
-
-		if (mouseMaps[i].repeatTimer != 0) {
-			KillTimer(NULL, mouseMaps[i].repeatTimer);
-
-			mouseMaps[i].repeatTimer = 0;
-		}
+	if (bGetMessageResult == -1) {
+		dwGetMessageError = GetLastError();
 	}
+
+	MV_FreeMouseMap(&mouseMaps);
 
 	UnhookWindowsHookEx(mouseHook);
 
 	ReleaseMutex(hMutex);
 
-	return 0;
+	if (bGetMessageResult != -1) {
+		return dwGetMessageError;
+	} else {
+		return 0;
+	}
 }
 
 void __stdcall WinMainCRTStartup() {
